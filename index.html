@@ -1,602 +1,356 @@
-<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Chowing 3D</title>
-<style>
-*{box-sizing:border-box}
-html,body,#game{margin:0;width:100%;height:100%;overflow:hidden;background:#111;touch-action:none;font-family:system-ui}
-canvas{display:block;width:100%;height:100%}
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const WebSocket = require("ws");
 
-#menu{
- position:fixed;inset:0;z-index:20;
- display:flex;align-items:center;justify-content:center;
- background:#111820;color:white
-}
-.card{
- width:min(92%,430px);padding:24px;
- background:#202936;border-radius:22px
-}
-h1{font-size:32px;margin:0 0 8px}
-input,button{
- width:100%;padding:15px;margin-top:9px;
- border:0;border-radius:12px;font-size:17px
-}
-button{background:#475569;color:white;font-weight:800}
-.primary{background:#45bd50}
-.row{display:flex;gap:8px}
-.row>*{flex:1}
+const PORT = process.env.PORT || 8080;
+const rooms = new Map();
 
-#hud{
- display:none;position:fixed;inset:0;z-index:5;
- color:white;pointer-events:none
-}
-#room{
- position:absolute;top:12px;left:12px;
- background:#182333dd;padding:10px 14px;border-radius:12px
-}
-#cross{
- position:absolute;left:50%;top:50%;
- transform:translate(-50%,-50%);
- font-size:42px;font-weight:200
-}
-#hp{
- position:absolute;left:14px;bottom:22px;
- font-size:20px;font-weight:800
-}
-#ammo{
- position:absolute;right:18px;bottom:20px;
- font-size:25px;font-weight:900
-}
-#shoot{
- pointer-events:auto;position:absolute;
- right:22px;bottom:65px;
- width:125px;height:125px;border-radius:50%;
- background:#e52f35;color:white;
- display:flex;align-items:center;justify-content:center;
- font-size:22px;font-weight:900
-}
-#stick{
- pointer-events:auto;position:absolute;
- left:25px;bottom:45px;
- width:145px;height:145px;border-radius:50%;
- background:#ffffff22;border:2px solid #ffffff44
-}
-#knob{
- position:absolute;left:43px;top:43px;
- width:58px;height:58px;border-radius:50%;
- background:#ffffff77
-}
-#tip{
- position:absolute;top:12px;left:50%;
- transform:translateX(-50%);
- background:#182333dd;padding:10px 15px;
- border-radius:12px;text-align:center
-}
-</style>
-</head>
-
-<body>
-<div id="game"></div>
-
-<div id="menu">
- <div class="card">
-  <h1>🔫 Chowing 3D</h1>
-  <div>모바일 1인칭 슈팅</div>
-
-  <input id="name" placeholder="닉네임" maxlength="14">
-
-  <button class="primary" id="create">방 만들기</button>
-
-  <div class="row">
-   <input id="code" placeholder="방 코드">
-   <button id="join">방 입장</button>
-  </div>
-
-  <button id="copy" style="display:none">초대 링크 복사</button>
- </div>
-</div>
-
-<div id="hud">
- <div id="room"></div>
- <div id="tip">왼쪽 이동 · 화면 드래그로 시점 회전</div>
- <div id="cross">+</div>
- <div id="hp">❤️ 100</div>
- <div id="ammo">🔫 12 / 60</div>
- <div id="shoot">발사</div>
- <div id="stick"><div id="knob"></div></div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-
-<script>
-let scene,camera,renderer;
-let ws=null;
-let myId=null;
-let roomCode="";
-let players={};
-
-let me={
- x:0,z:5,yaw:0,pitch:0,
- hp:100,ammo:12,
- moving:false
-};
-
-let gun,hand;
-let lastSend=0;
-let dragging=false;
-let lastX=0,lastY=0;
-
-const menu=document.getElementById("menu");
-const hud=document.getElementById("hud");
-const roomEl=document.getElementById("room");
-
-function init3D(){
-
- scene=new THREE.Scene();
- scene.background=new THREE.Color(0x82bce8);
-
- camera=new THREE.PerspectiveCamera(
-   75,innerWidth/innerHeight,.1,500
- );
-
- renderer=new THREE.WebGLRenderer({
-   antialias:true
- });
- renderer.setPixelRatio(Math.min(devicePixelRatio,2));
- renderer.setSize(innerWidth,innerHeight);
- document.getElementById("game").appendChild(renderer.domElement);
-
- // 빛
- scene.add(new THREE.HemisphereLight(0xffffff,0x405040,2));
-
- const sun=new THREE.DirectionalLight(0xffffff,2);
- sun.position.set(10,30,10);
- scene.add(sun);
-
- // 바닥
- const floor=new THREE.Mesh(
-   new THREE.PlaneGeometry(100,100),
-   new THREE.MeshStandardMaterial({color:0x354536})
- );
- floor.rotation.x=-Math.PI/2;
- scene.add(floor);
-
- // 벽/건물
- makeBox(0,2,-15,30,4,1,0x59636a);
- makeBox(-15,2,0,1,4,30,0x59636a);
- makeBox(15,2,0,1,4,30,0x59636a);
-
- // 장애물
- makeBox(0,1,-5,6,2,3,0x555b60);
- makeBox(-8,1,5,4,2,4,0x686d72);
- makeBox(8,1,7,4,2,4,0x686d72);
-
- // 총
- createGun();
-
- window.addEventListener("resize",resize);
-
- renderer.domElement.addEventListener("pointerdown",pointerDown);
- renderer.domElement.addEventListener("pointermove",pointerMove);
- renderer.domElement.addEventListener("pointerup",pointerUp);
- renderer.domElement.addEventListener("pointercancel",pointerUp);
-
- animate();
+function makeCode() {
+  let c;
+  do {
+    c = crypto.randomBytes(3).toString("hex").toUpperCase();
+  } while (rooms.has(c));
+  return c;
 }
 
-function makeBox(x,y,z,w,h,d,color){
- const m=new THREE.Mesh(
-  new THREE.BoxGeometry(w,h,d),
-  new THREE.MeshStandardMaterial({color})
- );
- m.position.set(x,y,z);
- scene.add(m);
- return m;
+function players(room) {
+  return [...room.players.values()].map(p => ({
+    id: p.id,
+    name: p.name,
+    x: p.x,
+    z: p.z,
+    yaw: p.yaw,
+    hp: p.hp,
+    weapon: p.weapon,
+    alive: p.alive
+  }));
 }
 
-function createGun(){
+function broadcast(room, data, except = null) {
+  const msg = JSON.stringify(data);
 
- gun=new THREE.Group();
-
- // 총 본체
- const body=new THREE.Mesh(
-  new THREE.BoxGeometry(.38,.28,1.15),
-  new THREE.MeshStandardMaterial({color:0x151515,metalness:.6})
- );
- body.position.z=-.55;
- gun.add(body);
-
- // 총열
- const barrel=new THREE.Mesh(
-  new THREE.CylinderGeometry(.075,.075,.75,16),
-  new THREE.MeshStandardMaterial({color:0x080808,metalness:.8})
- );
- barrel.rotation.x=Math.PI/2;
- barrel.position.set(0,.02,-1.25);
- gun.add(barrel);
-
- // 손
- hand=new THREE.Mesh(
-  new THREE.SphereGeometry(.2,16,16),
-  new THREE.MeshStandardMaterial({color:0xc58b6b})
- );
- hand.position.set(0,-.25,-.55);
- gun.add(hand);
-
- gun.position.set(.42,-.35,-.8);
- gun.rotation.set(0,0,0);
-
- camera.add(gun);
- scene.add(camera);
+  for (const p of room.players.values()) {
+    if (p.ws !== except && p.ws.readyState === WebSocket.OPEN) {
+      p.ws.send(msg);
+    }
+  }
 }
 
-function animate(){
+const server = http.createServer((req, res) => {
+  let url = req.url.split("?")[0];
 
- requestAnimationFrame(animate);
+  if (url === "/") {
+    url = "/index.html";
+  }
 
- if(!scene)return;
+  const file = path.join(
+    __dirname,
+    "public",
+    path.normalize(url)
+  );
 
- updatePlayerMovement();
+  const publicDir = path.join(__dirname, "public");
 
- camera.position.x=me.x;
- camera.position.y=1.65;
- camera.position.z=me.z;
+  if (!file.startsWith(publicDir)) {
+    res.writeHead(403);
+    return res.end("Forbidden");
+  }
 
- camera.rotation.order="YXZ";
- camera.rotation.y=me.yaw;
- camera.rotation.x=me.pitch;
+  fs.readFile(file, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      return res.end("Not Found");
+    }
 
- // 총 흔들림
- if(me.moving){
-   const t=performance.now()/100;
-   gun.position.y=-.35+Math.sin(t)*.025;
-   gun.rotation.z=Math.sin(t)*.025;
- }else{
-   gun.position.y=-.35;
-   gun.rotation.z=0;
- }
+    let type = "text/plain";
 
- renderer.render(scene,camera);
-}
+    if (file.endsWith(".html")) {
+      type = "text/html; charset=utf-8";
+    } else if (file.endsWith(".js")) {
+      type = "text/javascript; charset=utf-8";
+    } else if (file.endsWith(".css")) {
+      type = "text/css; charset=utf-8";
+    }
 
-function resize(){
- if(!camera)return;
- camera.aspect=innerWidth/innerHeight;
- camera.updateProjectionMatrix();
- renderer.setSize(innerWidth,innerHeight);
-}
+    res.writeHead(200, {
+      "Content-Type": type
+    });
 
-function pointerDown(e){
- if(e.target.id==="shoot")return;
- dragging=true;
- lastX=e.clientX;
- lastY=e.clientY;
-}
-
-function pointerMove(e){
-
- if(!dragging)return;
-
- const dx=e.clientX-lastX;
- const dy=e.clientY-lastY;
-
- lastX=e.clientX;
- lastY=e.clientY;
-
- me.yaw-=dx*.006;
- me.pitch-=dy*.006;
-
- me.pitch=Math.max(-1.35,Math.min(1.35,me.pitch));
-}
-
-function pointerUp(){
- dragging=false;
-}
-
-let joyX=0,joyY=0;
-let joyActive=false;
-
-const stick=document.getElementById("stick");
-const knob=document.getElementById("knob");
-
-stick.addEventListener("pointerdown",e=>{
- joyActive=true;
- stick.setPointerCapture(e.pointerId);
- moveJoy(e);
+    res.end(data);
+  });
 });
 
-stick.addEventListener("pointermove",e=>{
- if(joyActive)moveJoy(e);
+const wss = new WebSocket.Server({
+  server
 });
 
-stick.addEventListener("pointerup",()=>{
- joyActive=false;
- joyX=joyY=0;
- knob.style.transform="translate(0,0)";
+wss.on("connection", ws => {
+  let me = null;
+  let room = null;
+
+  ws.on("message", raw => {
+    let msg;
+
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+
+    /* 방 만들기 */
+    if (msg.type === "create") {
+      const code = makeCode();
+
+      room = {
+        code,
+        host: null,
+        started: false,
+        players: new Map()
+      };
+
+      me = {
+        id: crypto.randomUUID(),
+        name: String(msg.name || "플레이어").slice(0, 14),
+        ws,
+
+        x: -8,
+        z: 0,
+        yaw: 0,
+
+        hp: 100,
+        weapon: "pistol",
+        alive: true
+      };
+
+      room.host = me.id;
+      room.players.set(me.id, me);
+      rooms.set(code, room);
+
+      ws.send(JSON.stringify({
+        type: "room",
+        code,
+        id: me.id,
+        host: true,
+        players: players(room)
+      }));
+
+      return;
+    }
+
+    /* 방 입장 */
+    if (msg.type === "join") {
+      const code = String(msg.code || "").toUpperCase();
+
+      room = rooms.get(code);
+
+      if (!room) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "방을 찾을 수 없습니다."
+        }));
+        return;
+      }
+
+      if (room.started) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "이미 게임이 시작되었습니다."
+        }));
+        return;
+      }
+
+      me = {
+        id: crypto.randomUUID(),
+        name: String(msg.name || "플레이어").slice(0, 14),
+
+        ws,
+
+        x: 8,
+        z: 0,
+        yaw: Math.PI,
+
+        hp: 100,
+        weapon: "pistol",
+        alive: true
+      };
+
+      room.players.set(me.id, me);
+
+      ws.send(JSON.stringify({
+        type: "room",
+        code: room.code,
+        id: me.id,
+        host: false,
+        players: players(room)
+      }));
+
+      broadcast(room, {
+        type: "players",
+        players: players(room)
+      });
+
+      return;
+    }
+
+    if (!room || !me) {
+      return;
+    }
+
+    /* 게임 시작 */
+    if (msg.type === "start") {
+      if (me.id !== room.host) {
+        return;
+      }
+
+      room.started = true;
+
+      let index = 0;
+
+      for (const p of room.players.values()) {
+        p.x = index === 0 ? -8 : 8;
+        p.z = 0;
+        p.yaw = index === 0 ? 0 : Math.PI;
+        p.hp = 100;
+        p.weapon = "pistol";
+        p.alive = true;
+
+        index++;
+      }
+
+      broadcast(room, {
+        type: "start",
+        players: players(room)
+      });
+
+      return;
+    }
+
+    /* 플레이어 위치/시점 */
+    if (msg.type === "state") {
+      if (!me.alive) {
+        return;
+      }
+
+      me.x = Number(msg.x) || 0;
+      me.z = Number(msg.z) || 0;
+      me.yaw = Number(msg.yaw) || 0;
+
+      broadcast(room, {
+        type: "state",
+        id: me.id,
+        x: me.x,
+        z: me.z,
+        yaw: me.yaw,
+        hp: me.hp,
+        weapon: me.weapon,
+        alive: me.alive
+      }, ws);
+
+      return;
+    }
+
+    /* 무기 줍기 */
+    if (msg.type === "pickup") {
+      if (!room.started || !me.alive) {
+        return;
+      }
+
+      me.weapon = "sniper";
+
+      broadcast(room, {
+        type: "weapon",
+        id: me.id,
+        weapon: "sniper"
+      });
+
+      return;
+    }
+
+    /* 총 쏘기 */
+    if (msg.type === "shoot") {
+      if (!room.started || !me.alive) {
+        return;
+      }
+
+      const target = room.players.get(msg.target);
+
+      if (!target || !target.alive) {
+        return;
+      }
+
+      const damage =
+        me.weapon === "sniper"
+          ? 40
+          : 20;
+
+      target.hp = Math.max(
+        0,
+        target.hp - damage
+      );
+
+      if (target.hp <= 0) {
+        target.hp = 0;
+        target.alive = false;
+      }
+
+      broadcast(room, {
+        type: "hit",
+        attacker: me.id,
+        target: target.id,
+        damage,
+        hp: target.hp,
+        alive: target.alive
+      });
+
+      if (!target.alive) {
+        room.started = false;
+
+        broadcast(room, {
+          type: "result",
+          winner: me.name,
+          loser: target.name
+        });
+      }
+
+      return;
+    }
+  });
+
+  ws.on("close", () => {
+    if (!room || !me) {
+      return;
+    }
+
+    room.players.delete(me.id);
+
+    if (room.players.size === 0) {
+      rooms.delete(room.code);
+      return;
+    }
+
+    /* 방장이 나가면 다음 사람에게 방장 권한 */
+    if (room.host === me.id) {
+      const next = room.players.values().next().value;
+
+      if (next) {
+        room.host = next.id;
+
+        next.ws.send(JSON.stringify({
+          type: "host",
+          id: next.id
+        }));
+      }
+    }
+
+    broadcast(room, {
+      type: "players",
+      players: players(room)
+    });
+  });
 });
 
-function moveJoy(e){
-
- const r=stick.getBoundingClientRect();
- let x=e.clientX-(r.left+r.width/2);
- let y=e.clientY-(r.top+r.height/2);
-
- const max=45;
- const len=Math.hypot(x,y);
-
- if(len>max){
-  x=x/len*max;
-  y=y/len*max;
- }
-
- joyX=x/max;
- joyY=y/max;
-
- knob.style.transform=`translate(${x}px,${y}px)`;
-}
-
-function updatePlayerMovement(){
-
- if(!joyActive){
-  me.moving=false;
-  return;
- }
-
- const speed=.12;
-
- const forwardX=-Math.sin(me.yaw);
- const forwardZ=-Math.cos(me.yaw);
-
- const rightX=Math.cos(me.yaw);
- const rightZ=-Math.sin(me.yaw);
-
- me.x+=(forwardX*(-joyY)+rightX*joyX)*speed;
- me.z+=(forwardZ*(-joyY)+rightZ*joyX)*speed;
-
- me.moving=Math.abs(joyX)+Math.abs(joyY)>.1;
-
- sendState();
-}
-
-function sendState(){
-
- if(!ws||ws.readyState!==1)return;
-
- const now=Date.now();
-
- if(now-lastSend<50)return;
- lastSend=now;
-
- ws.send(JSON.stringify({
-  t:"state",
-  x:me.x,
-  z:me.z,
-  yaw:me.yaw
- }));
-}
-
-function connect(){
-
- ws=new WebSocket(
-  (location.protocol==="https:"?"wss://":"ws://")+location.host
- );
-
- ws.onmessage=e=>{
-
-  const m=JSON.parse(e.data);
-
-  if(m.t==="room"){
-   roomCode=m.c;
-   myId=m.id;
-
-   roomEl.textContent="방: "+roomCode;
-
-   menu.style.display="none";
-   hud.style.display="block";
-
-   copyLink();
-   updatePlayers(m.p);
-  }
-
-  if(m.t==="players"){
-   updatePlayers(m.p);
-  }
-
-  if(m.t==="start"){
-   updatePlayers(m.p);
-  }
-
-  if(m.t==="state"){
-   if(m.id===myId)return;
-
-   if(!players[m.id]){
-    createEnemy(m.id);
-   }
-
-   players[m.id].position.x=m.x;
-   players[m.id].position.z=m.z;
-   players[m.id].rotation.y=m.yaw;
-  }
-
-  if(m.t==="hit"){
-   if(m.id===myId){
-    me.hp=m.hp;
-    document.getElementById("hp").textContent="❤️ "+me.hp;
-   }
-  }
-
-  if(m.t==="result"){
-   alert(m.winner+" 승리!");
-  }
-
-  if(m.t==="err"){
-   alert(m.m);
-  }
- };
-}
-
-function updatePlayers(list){
-
- if(!list)return;
-
- list.forEach(p=>{
-
-  if(p.id===myId){
-   me.hp=p.hp;
-   document.getElementById("hp").textContent="❤️ "+p.hp;
-   return;
-  }
-
-  if(!players[p.id])createEnemy(p.id);
-
-  players[p.id].position.x=p.x;
-  players[p.id].position.z=p.z;
-  players[p.id].rotation.y=p.yaw;
- });
-}
-
-function createEnemy(id){
-
- const g=new THREE.Group();
-
- const body=new THREE.Mesh(
-  new THREE.BoxGeometry(.8,1.4,.5),
-  new THREE.MeshStandardMaterial({color:0x2255cc})
- );
- body.position.y=.7;
- g.add(body);
-
- const head=new THREE.Mesh(
-  new THREE.SphereGeometry(.3,16,16),
-  new THREE.MeshStandardMaterial({color:0xc58b6b})
- );
- head.position.y=1.65;
- g.add(head);
-
- scene.add(g);
- players[id]=g;
-}
-
-function createRoom(){
-
- const name=document.getElementById("name").value.trim()||"플레이어";
-
- connect();
-
- waitSocket(()=>{
-  ws.send(JSON.stringify({
-   t:"create",
-   name
-  }));
- });
-}
-
-function joinRoom(){
-
- const name=document.getElementById("name").value.trim()||"플레이어";
- const c=document.getElementById("code").value.trim();
-
- if(!c){
-  alert("방 코드를 입력하세요.");
-  return;
- }
-
- connect();
-
- waitSocket(()=>{
-  ws.send(JSON.stringify({
-   t:"join",
-   name,
-   c
-  }));
- });
-}
-
-function waitSocket(fn){
-
- const timer=setInterval(()=>{
-
-  if(ws&&ws.readyState===1){
-   clearInterval(timer);
-   fn();
-  }
-
- },50);
-}
-
-function copyLink(){
-
- const url=location.origin+location.pathname+"?room="+roomCode;
-
- navigator.clipboard?.writeText(url);
-
- document.getElementById("copy").style.display="block";
-
- document.getElementById("copy").onclick=()=>{
-  navigator.clipboard.writeText(url);
-  alert("초대 링크를 복사했습니다.");
- };
-}
-
-document.getElementById("create").onclick=createRoom;
-document.getElementById("join").onclick=joinRoom;
-
-document.getElementById("shoot").addEventListener("pointerdown",shoot);
-
-function shoot(e){
-
- e.preventDefault();
-
- if(!ws||ws.readyState!==1)return;
-
- if(me.ammo<=0){
-  alert("탄약이 없습니다.");
-  return;
- }
-
- me.ammo--;
-
- document.getElementById("ammo").textContent=
-  "🔫 "+me.ammo+" / 60";
-
- // 총 반동
- gun.rotation.x=-.15;
-
- setTimeout(()=>{
-  gun.rotation.x=0;
- },90);
-
- // 서버에 사격 요청
- // 화면 중앙에 있는 가장 가까운 적을 찾음
- let target=null;
- let best=999;
-
- for(const id in players){
-
-  const p=players[id];
-
-  const dx=p.position.x-me.x;
-  const dz=p.position.z-me.z;
-  const dist=Math.hypot(dx,dz);
-
-  if(dist<best){
-   best=dist;
-   target=id;
-  }
- }
-
- if(target&&best<20){
-
-  ws.send(JSON.stringify({
-   t:"shoot",
-   id:target
-  }));
- }
-}
-
-init3D();
-</script>
-</body>
-</html>
+server.listen(PORT, () => {
+  console.log("서버 실행 중: " + PORT);
+});
