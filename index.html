@@ -1,19 +1,152 @@
-const http=require('http'),fs=require('fs'),path=require('path'),crypto=require('crypto'),WebSocket=require('ws');
-const PORT=process.env.PORT||8080,rooms=new Map();
-function code(){let c;do c=crypto.randomBytes(3).toString('hex').toUpperCase();while(rooms.has(c));return c}
-function pub(r){return [...r.p.values()].map(x=>({id:x.id,name:x.name,x:x.x,z:x.z,yaw:x.yaw,hp:x.hp,weapon:x.weapon,alive:x.alive}))}
-function send(r,m,skip){for(const x of r.p.values())if(x.ws!==skip&&x.ws.readyState===1)x.ws.send(JSON.stringify(m))}
-const srv=http.createServer((q,s)=>{let f=q.url==='/'?'/index.html':q.url.split('?')[0],p=path.join(__dirname,'public',path.normalize(f));if(!p.startsWith(public.toString()))return s.end();fs.readFile(p,(e,d)=>{if(e)return s.writeHead(404).end();s.writeHead(200,{'Content-Type':path.extname(p)==='.js'?'text/javascript':'text/html'}).end(d)})});
-const wss=new WebSocket.Server({server:srv});
-wss.on('connection',ws=>{let me,r;
-ws.on('message',b=>{let m;try{m=JSON.parse(b)}catch{return}
-if(m.t==='create'){let c=code();r={c,p:new Map(),host:null,started:false};rooms.set(c,r);me={id:crypto.randomUUID(),name:(m.name||'玩家').slice(0,14),ws,x:-8,z:0,yaw:0,hp:100,weapon:'pistol',alive:true};r.host=me.id;r.p.set(me.id,me);ws.send(JSON.stringify({t:'room',c,id:me.id,host:true,p:pub(r)}));return}
-if(m.t==='join'){r=rooms.get(String(m.c||'').toUpperCase());if(!r)return ws.send(JSON.stringify({t:'err',m:'방을 찾을 수 없습니다.'}));if(r.started)return ws.send(JSON.stringify({t:'err',m:'이미 시작된 방입니다.'}));me={id:crypto.randomUUID(),name:(m.name||'玩家').slice(0,14),ws,x:8,z:0,yaw:Math.PI,hp:100,weapon:'pistol',alive:true};r.p.set(me.id,me);ws.send(JSON.stringify({t:'room',c:r.c,id:me.id,host:false,p:pub(r)}));send(r,{t:'players',p:pub(r)});return}
-if(!r||!me)return;
-if(m.t==='start'&&me.id===r.host){r.started=true;let i=0;for(let x of r.p.values()){x.x=i++?8:-8;x.z=0;x.hp=100;x.alive=true;x.weapon='pistol'}send(r,{t:'start',p:pub(r)});return}
-if(m.t==='state'&&me.alive){me.x=+m.x||0;me.z=+m.z||0;me.yaw=+m.yaw||0;send(r,{t:'state',id:me.id,x:me.x,z:me.z,yaw:me.yaw,weapon:me.weapon,hp:me.hp,alive:me.alive},ws);return}
-if(m.t==='pickup'&&r.started&&me.alive){me.weapon='sniper';send(r,{t:'weapon',id:me.id,weapon:'sniper'});return}
-if(m.t==='shoot'&&r.started&&me.alive){let tar=r.p.get(m.id);if(!tar||!tar.alive)return;let dmg=me.weapon==='sniper'?40:20;tar.hp=Math.max(0,tar.hp-dmg);if(!tar.hp)tar.alive=false;send(r,{t:'hit',from:me.id,id:tar.id,dmg,hp:tar.hp,alive:tar.alive});if(!tar.alive){r.started=false;send(r,{t:'result',winner:me.name,loser:tar.name})}}
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const WebSocket = require('ws');
+
+const PORT = process.env.PORT || 8080;
+const rooms = new Map();
+
+function code() {
+    let c;
+    do {
+        c = crypto.randomBytes(3).toString('hex').toUpperCase();
+    } while (rooms.has(c));
+    return c;
+}
+
+function pub(r) {
+    return [...r.p.values()].map(x => ({
+        id: x.id, name: x.name, x: x.x, z: x.z, yaw: x.yaw, hp: x.hp, weapon: x.weapon, alive: x.alive
+    }));
+}
+
+function send(r, m, skip) {
+    for (const x of r.p.values()) {
+        if (x.ws !== skip && x.ws.readyState === 1) {
+            x.ws.send(JSON.stringify(m));
+        }
+    }
+}
+
+// 1. HTTP 서버 (public 폴더 내의 index.html, js, css 등 정적 파일 제공)
+const publicDir = path.join(__dirname, 'public');
+
+const srv = http.createServer((q, s) => {
+    let f = q.url === '/' ? '/index.html' : q.url.split('?')[0];
+    let p = path.join(publicDir, path.normalize(f));
+
+    // 보안 검사: publicDir 외의 접근 차단 (수정된 부분)
+    if (!p.startsWith(publicDir)) {
+        s.writeHead(403).end();
+        return;
+    }
+
+    fs.readFile(p, (e, d) => {
+        if (e) {
+            s.writeHead(404).end();
+            return;
+        }
+        const ext = path.extname(p);
+        const contentType = ext === '.js' ? 'text/javascript' : (ext === '.css' ? 'text/css' : 'text/html');
+        s.writeHead(200, { 'Content-Type': contentType }).end(d);
+    });
 });
-ws.on('close',()=>{if(r&&me){r.p.delete(me.id);send(r,{t:'players',p:pub(r)});if(!r.p.size)rooms.delete(r.c)}})});
-srv.listen(PORT,()=>console.log('listening '+PORT));
+
+// 2. WebSocket 서버 (실시간 게임 통신)
+const wss = new WebSocket.Server({ server: srv });
+
+wss.on('connection', ws => {
+    let me, r;
+
+    ws.on('message', b => {
+        let m;
+        try { m = JSON.parse(b); } catch { return; }
+
+        // 방 생성
+        if (m.t === 'create') {
+            let c = code();
+            r = { c, p: new Map(), host: null, started: false };
+            rooms.set(c, r);
+            me = { id: crypto.randomUUID(), name: (m.name || '플레이어').slice(0, 14), ws, x: -8, z: 0, yaw: 0, hp: 100, weapon: 'pistol', alive: true };
+            r.host = me.id;
+            r.p.set(me.id, me);
+            ws.send(JSON.stringify({ t: 'room', c, id: me.id, host: true, p: pub(r) }));
+            return;
+        }
+
+        // 방 참가
+        if (m.t === 'join') {
+            r = rooms.get(String(m.c || '').toUpperCase());
+            if (!r) return ws.send(JSON.stringify({ t: 'err', m: '방을 찾을 수 없습니다.' }));
+            if (r.started) return ws.send(JSON.stringify({ t: 'err', m: '이미 시작된 방입니다.' }));
+
+            me = { id: crypto.randomUUID(), name: (m.name || '플레이어').slice(0, 14), ws, x: 8, z: 0, yaw: Math.PI, hp: 100, weapon: 'pistol', alive: true };
+            r.p.set(me.id, me);
+            ws.send(JSON.stringify({ t: 'room', c: r.c, id: me.id, host: false, p: pub(r) }));
+            send(r, { t: 'players', p: pub(r) });
+            return;
+        }
+
+        if (!r || !me) return;
+
+        // 게임 시작
+        if (m.t === 'start' && me.id === r.host) {
+            r.started = true;
+            let i = 0;
+            for (let x of r.p.values()) {
+                x.x = i++ ? 8 : -8;
+                x.z = 0;
+                x.hp = 100;
+                x.alive = true;
+                x.weapon = 'pistol';
+            }
+            send(r, { t: 'start', p: pub(r) });
+            return;
+        }
+
+        // 플레이어 위치/시선 실시간 전송
+        if (m.t === 'state' && me.alive) {
+            me.x = +m.x || 0;
+            me.z = +m.z || 0;
+            me.yaw = +m.yaw || 0;
+            send(r, { t: 'state', id: me.id, x: me.x, z: me.z, yaw: me.yaw, weapon: me.weapon, hp: me.hp, alive: me.alive }, ws);
+            return;
+        }
+
+        // 무기 상구(저격총) 획득
+        if (m.t === 'pickup' && r.started && me.alive) {
+            me.weapon = 'sniper';
+            send(r, { t: 'weapon', id: me.id, weapon: 'sniper' });
+            return;
+        }
+
+        // 사격 및 데미지 계산
+        if (m.t === 'shoot' && r.started && me.alive) {
+            let tar = r.p.get(m.id);
+            if (!tar || !tar.alive) return;
+
+            let dmg = me.weapon === 'sniper' ? 40 : 20;
+            tar.hp = Math.max(0, tar.hp - dmg);
+            if (!tar.hp) tar.alive = false;
+
+            send(r, { t: 'hit', from: me.id, id: tar.id, dmg, hp: tar.hp, alive: tar.alive });
+
+            if (!tar.alive) {
+                r.started = false;
+                send(r, { t: 'result', winner: me.name, loser: tar.name });
+            }
+        }
+    });
+
+    // 접속 종료 시
+    ws.on('close', () => {
+        if (r && me) {
+            r.p.delete(me.id);
+            send(r, { t: 'players', p: pub(r) });
+            if (!r.p.size) rooms.delete(r.c);
+        }
+    });
+});
+
+srv.listen(PORT, () => console.log('서버가 성공적으로 열렸습니다! 포트: ' + PORT));
